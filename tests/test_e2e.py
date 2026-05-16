@@ -171,6 +171,13 @@ async def test_yahoo_alex():
 
 @e2e
 @pytest.mark.asyncio
+async def test_aol_alex():
+    result = await mailcat.aol("alex", mailcat.simple_session)
+    assert result == {"AOL": "alex@aol.com"}
+
+
+@e2e
+@pytest.mark.asyncio
 async def test_outlook_alex():
     """Headless Chromium drives signup.live.com — alex@outlook.com is taken."""
     result = await mailcat.outlook("alex", mailcat.simple_session)
@@ -350,6 +357,13 @@ async def test_interia_random_empty():
 @pytest.mark.asyncio
 async def test_yahoo_random_empty():
     result = await mailcat.yahoo(RANDOM_USERNAME, mailcat.simple_session)
+    assert result == {}
+
+
+@e2e
+@pytest.mark.asyncio
+async def test_aol_random_empty():
+    result = await mailcat.aol(RANDOM_USERNAME, mailcat.simple_session)
     assert result == {}
 
 

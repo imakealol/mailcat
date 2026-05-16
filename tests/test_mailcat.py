@@ -181,6 +181,89 @@ async def test_yahoo_reserved_word_treated_as_not_found():
     assert result == {}
 
 
+# AOL needs a two-call flow: GET signup page (text) then POST validate (json).
+_AOL_SIGNUP_HTML = (
+    '<form>'
+    '<input type="hidden" value="CRUMB123" name="crumb">'
+    '<input type="hidden" value="ACRUMB" name="acrumb">'
+    '<input type="hidden" value="QQ--" name="sessionIndex">'
+    '</form>'
+)
+
+
+def make_aol_mock_session(validate_json, signup_html=_AOL_SIGNUP_HTML,
+                          signup_status=200, validate_status=200):
+    signup_resp = AsyncMock()
+    signup_resp.status = signup_status
+    signup_resp.text = AsyncMock(return_value=signup_html)
+    signup_resp.__aenter__ = AsyncMock(return_value=signup_resp)
+    signup_resp.__aexit__ = AsyncMock(return_value=False)
+
+    validate_resp = AsyncMock()
+    validate_resp.status = validate_status
+    validate_resp.json = AsyncMock(return_value=validate_json)
+    validate_resp.__aenter__ = AsyncMock(return_value=validate_resp)
+    validate_resp.__aexit__ = AsyncMock(return_value=False)
+
+    session = AsyncMock()
+    session.get = AsyncMock(return_value=signup_resp)
+    session.post = AsyncMock(return_value=validate_resp)
+    session.close = AsyncMock()
+    session.cookie_jar = True
+
+    return lambda: session
+
+
+def test_aol_extract_tokens_value_before_name():
+    """Real AOL HTML emits value="..." before name="..." — make sure we parse it."""
+    tokens = mailcat._aol_extract_tokens(_AOL_SIGNUP_HTML)
+    assert tokens == {"crumb": "CRUMB123", "acrumb": "ACRUMB", "sessionIndex": "QQ--"}
+
+
+@pytest.mark.asyncio
+async def test_aol_found():
+    """ERROR_<num> on userId means the address is already in use."""
+    session_fun = make_aol_mock_session(
+        validate_json={"errors": [
+            {"name": "firstName", "error": "FIELD_EMPTY"},
+            {"name": "userId", "error": "ERROR_148"},
+        ]},
+    )
+    result = await mailcat.aol("alex", session_fun)
+    assert result == {"AOL": "alex@aol.com"}
+
+
+@pytest.mark.asyncio
+async def test_aol_not_found():
+    """No userId entry in errors[] means the address is free."""
+    session_fun = make_aol_mock_session(
+        validate_json={"errors": [{"name": "firstName", "error": "FIELD_EMPTY"}]},
+    )
+    result = await mailcat.aol("f3h53h54hdrg9rkz", session_fun)
+    assert result == {}
+
+
+@pytest.mark.asyncio
+async def test_aol_reserved_word_treated_as_not_found():
+    """RESERVED_WORD_PRESENT means AOL refuses the name but no one owns it."""
+    session_fun = make_aol_mock_session(
+        validate_json={"errors": [{"name": "userId", "error": "RESERVED_WORD_PRESENT"}]},
+    )
+    result = await mailcat.aol("admin", session_fun)
+    assert result == {}
+
+
+@pytest.mark.asyncio
+async def test_aol_signup_page_missing_tokens():
+    """If the signup form changes and we can't find crumb/acrumb/sessionIndex, bail."""
+    session_fun = make_aol_mock_session(
+        validate_json={"errors": [{"name": "userId", "error": "ERROR_148"}]},
+        signup_html="<html><body>no inputs here</body></html>",
+    )
+    result = await mailcat.aol("alex", session_fun)
+    assert result == {}
+
+
 @pytest.mark.asyncio
 async def test_startmail_found():
     session_fun = make_mock_session(status=404)

@@ -499,6 +499,91 @@ async def yahoo(target, req_session_fun, *args, **kwargs) -> Dict:
     return result
 
 
+# AOL shares Yahoo's signup infrastructure but is reachable at login.aol.com.
+# Unlike yahoo() this fetches crumb/acrumb/sessionIndex and session cookies
+# fresh on every call from the signup page, so there is nothing to manually
+# refresh when tokens expire.
+_AOL_INPUT_TAG_RE = re.compile(r'<input\b[^>]*>')
+_AOL_ATTR_RE = re.compile(r'\b(name|value)="([^"]*)"')
+
+
+def _aol_extract_tokens(html: str) -> Dict[str, str]:
+    wanted = {"crumb", "acrumb", "sessionIndex"}
+    tokens: Dict[str, str] = {}
+    for tag in _AOL_INPUT_TAG_RE.finditer(html):
+        attrs = dict(_AOL_ATTR_RE.findall(tag.group(0)))
+        name = attrs.get("name")
+        if name in wanted and "value" in attrs:
+            tokens[name] = attrs["value"]
+    return tokens
+
+
+async def aol(target, req_session_fun, *args, **kwargs) -> Dict:
+    result = {}
+
+    timeout = kwargs.get('timeout', 5)
+    signup_url = "https://login.aol.com/account/create"
+    validate_url = ("https://login.aol.com/account/module/create"
+                    "?specId=yidregsimplified&validateField=userId")
+    ua = ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+          "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/147.0.0.0 Safari/537.36")
+    sreq = req_session_fun()
+
+    try:
+        page = await sreq.get(signup_url, headers={"User-Agent": ua}, timeout=timeout)
+        async with page:
+            if page.status != 200:
+                return result
+            html = await page.text()
+
+        tokens = _aol_extract_tokens(html)
+        # Need all three to make a valid POST; if AOL changes the form, bail out.
+        if not all(k in tokens for k in ("crumb", "acrumb", "sessionIndex")):
+            return result
+
+        headers = {
+            "User-Agent": ua,
+            "Accept": "*/*",
+            "Content-Type": "application/x-www-form-urlencoded",
+            "Origin": "https://login.aol.com",
+            "Referer": signup_url,
+            "X-Requested-With": "XMLHttpRequest",
+        }
+        data = {
+            "sessionIndex": tokens["sessionIndex"],
+            "acrumb": tokens["acrumb"],
+            "crumb": tokens["crumb"],
+            "specId": "yidregsimplified",
+            "context": "REGISTRATION",
+            "attrSetIndex": "0",
+            "tos0": "oath_freereg|en|en-US",
+            "lastName": "r",
+            "yidDomain": "aol.com",
+            "userId": target,
+        }
+        validate = await sreq.post(validate_url, headers=headers, data=data, timeout=timeout)
+        async with validate:
+            if validate.status != 200:
+                return result
+            resp = await validate.json(content_type=None)
+            for err in resp.get("errors", []):
+                if err.get("name") != "userId":
+                    continue
+                code = err.get("error", "")
+                # ERROR_<num> means the userId is already in use. RESERVED_WORD_PRESENT
+                # and LENGTH_TOO_SHORT mean the API refused the name for reasons other
+                # than ownership — treat both as inconclusive (no positive hit).
+                if code.startswith("ERROR_"):
+                    result["AOL"] = f"{target}@aol.com"
+                break
+    except Exception as e:
+        logger.error(e, exc_info=True)
+
+    await sreq.close()
+
+    return result
+
+
 async def _launch_headless():
     """Launch a headless Chromium instance with anti-fingerprinting flags.
     Caller is responsible for closing it."""
@@ -1936,7 +2021,7 @@ async def print_results(checker, target, req_session_fun, is_verbose_mode, timeo
 # Each function still runs if invoked explicitly via `-p <name>`, but it
 # emits a deprecation notice and almost always returns {}.
 CHECKERS = [gmail, yandex, proton, mailRu,
-            rambler, yahoo, outlook,
+            rambler, yahoo, aol, outlook,
             zoho, eclipso, posteo,
             firemail, fastmail, startmail,
             ukrnet,
